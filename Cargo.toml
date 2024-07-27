@@ -1,0 +1,7 @@
+[package]
+name = "fr-pm-jack-connection-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+jack = "0.11.4"

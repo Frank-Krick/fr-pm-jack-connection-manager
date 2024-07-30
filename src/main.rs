@@ -1,215 +1,254 @@
-use crate::domain::audio_interface::AudioInterface;
-use crate::domain::audio_interface::umc_1820::Umc1820;
-use crate::domain::digital_drum_section::DigitalDrumSection;
-use crate::domain::group_mixer_section::GroupMixerSection;
-use crate::domain::jack_connection_manager::JackConnectionManager;
-use crate::domain::jack_mixer::JackMixer;
-use crate::domain::main_input_mixer_section::MainInputMixerChannel;
-use crate::domain::zyn_add_sub_fx::ZynAddSubFx;
+use anyhow::Result;
+use std::cell::OnceCell;
 
+use crate::channel_messages::{ModHostCommand, PipewireCommand};
+use crate::client::mod_host_client::ModHostClient;
+use crate::fr_pipewire::{PipewireDevice, PipewirePort};
+use dashmap::DashMap;
+use pipewire::channel;
+use pipewire::context::Context;
+use pipewire::loop_::Signal;
+use pipewire::main_loop::MainLoop;
+use pipewire::types::ObjectType;
+use std::net::TcpStream;
+use std::rc::Rc;
+use std::sync::mpsc::Receiver;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
+use pipewire::spa::utils::dict::DictRef;
+use crate::registry::pipewire_port_registry::PipewirePortRegistry;
+use crate::service::mod_host_service::ModHostService;
+
+mod channel_messages;
+mod client;
 mod domain;
+mod fr_pipewire;
+mod service;
+mod registry;
+mod builder;
 
-fn main() {
-    let jack_connection_manager = JackConnectionManager::new();
-    let digital_drum_section = DigitalDrumSection::new();
+fn main() -> Result<()> {
+    let devices_map = Arc::new(DashMap::<String, PipewireDevice>::new());
+    let ports_map = Arc::new(DashMap::<String, PipewirePort>::new());
 
-    digital_drum_section.connect_internals(&jack_connection_manager);
+    let (mod_host_queue_sender, mod_host_queue_receiver) = mpsc::channel();
+    let (pipewire_sender, pipewire_receiver) = channel::channel();
 
-    let main_input_mixer_section = MainInputMixerChannel::new();
+    let mod_host_service_thread = start_mod_host_service_thread(mod_host_queue_receiver)?;
 
-    main_input_mixer_section.connect_internals(&jack_connection_manager);
+    let devices_map_pipewire_thread = devices_map.clone();
+    let ports_map_clone = ports_map.clone();
+    let pipewire_control_thread = thread::spawn(move || {
+        for i in 0..5 {
+            thread::sleep(Duration::from_secs(5));
+            /*
+            match pipewire_sender.send(PipewireCommand::Connect {}) {
+                Ok(_) => {
+                    println!("added")
+                }
+                Err(error) => {
+                    println!("failed {:?}", error)
+                }
+            }
+             */
+            let pw_registry = PipewirePortRegistry {
+                ports_map: ports_map_clone.clone()
+            };
 
-    connect_digital_drum_section(
-        &jack_connection_manager,
-        &digital_drum_section,
-        &main_input_mixer_section);
+            let nodes = pw_registry.get_nodes();
+        }
+    });
 
-    let audio_interface = Umc1820::new();
 
-    connect_audio_interface(
-        &jack_connection_manager,
-        &main_input_mixer_section,
-        &audio_interface);
+    let mut mod_host_service = ModHostService::new(mod_host_queue_sender);
+    mod_host_service.add_lv2_plugin(String::from("http://calf.sourceforge.net/plugins/Compressor"));
 
-    let zyn_add_sub_fx = ZynAddSubFx::new();
+    let devices_map_pipewire_loop = devices_map.clone();
+    let ports_map_clone = ports_map.clone();
+    let _ = start_pipewire_loop(pipewire_receiver, devices_map_pipewire_loop, ports_map_clone);
 
-    connect_zyn_sub_add_fx(
-        &jack_connection_manager,
-        &main_input_mixer_section,
-        &zyn_add_sub_fx);
-
-    connect_send_to_torso_s4(
-        &jack_connection_manager,
-        &main_input_mixer_section,
-        &audio_interface);
-
-    let group_mixer_section = GroupMixerSection::new();
-    group_mixer_section.connect_internals(&jack_connection_manager);
-
-    connect_group_section_to_audio_output(
-        &jack_connection_manager,
-        &audio_interface,
-        &group_mixer_section);
-
-    connect_drum_channels(
-        &jack_connection_manager,
-        &main_input_mixer_section,
-        &group_mixer_section);
+    //mod_host_service_thread.join().unwrap();
+    Ok(())
 }
 
-fn connect_drum_channels(jack_connection_manager: &JackConnectionManager,
-                         main_input_mixer_section: &MainInputMixerChannel,
-                         group_mixer_section: &GroupMixerSection) {
-    jack_connection_manager.connect(
-        main_input_mixer_section.mixer().output_channels_by_name("DSMPL")[0],
-        &group_mixer_section.channel_inputs(0)[0]
-    );
-    jack_connection_manager.connect(
-        main_input_mixer_section.mixer().output_channels_by_name("DSMPL")[1],
-        &group_mixer_section.channel_inputs(0)[1]
-    );
+fn start_pipewire_loop(
+    pipewire_receiver: pipewire::channel::Receiver<PipewireCommand>,
+    devices_map: Arc<DashMap<String, PipewireDevice>>,
+    ports_map: Arc<DashMap<String, PipewirePort>>
+) -> Result<()> {
+    pipewire::init();
+    let main_loop = MainLoop::new(None)?;
+    let context = Context::new(&main_loop)?;
+    let core = context.connect(None)?;
+    let registry = core.get_registry()?;
 
-    jack_connection_manager.connect(
-        main_input_mixer_section.mixer().output_channels_by_name("DFire")[0],
-        &group_mixer_section.channel_inputs(0)[0]
-    );
-    jack_connection_manager.connect(
-        main_input_mixer_section.mixer().output_channels_by_name("DFire")[1],
-        &group_mixer_section.channel_inputs(0)[1]
-    );
+    let factory: Rc<OnceCell<String>> = Rc::new(OnceCell::new());
+    let factory_clone = factory.clone();
 
-    jack_connection_manager.connect(
-        main_input_mixer_section.mixer().output_channels_by_name("DEuro")[0],
-        &group_mixer_section.channel_inputs(0)[0]
-    );
-    jack_connection_manager.connect(
-        main_input_mixer_section.mixer().output_channels_by_name("DEuro")[1],
-        &group_mixer_section.channel_inputs(0)[1]
-    );
+    let reg_listener_device_map = devices_map.clone();
+    let ports_map_clone = ports_map.clone();
+    let main_loop_weak = main_loop.downgrade();
+    let reg_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if let Some(props) = global.props {
+                handle_device_update(reg_listener_device_map.clone(), props);
+                handle_port_update(ports_map_clone.clone(), props);
+
+                if props.get("factory.type.name") == Some(ObjectType::Link.to_str()) {
+                    let factory_name = props.get("factory.name").expect("Factory has no name");
+                    let _ = factory_clone.set(factory_name.to_owned());
+                }
+
+                // We found the factory we needed, so quit the loop.
+                if factory_clone.get().is_some() {
+                    if let Some(main_loop) = main_loop_weak.upgrade() {
+                        main_loop.quit();
+                    }
+                }
+            }
+        })
+        .register();
+
+    main_loop.run();
+
+    drop(reg_listener);
+
+    let reg_device_and_link_listener_devices_map = devices_map.clone();
+    let ports_map_clone = ports_map.clone();
+    let reg_device_and_link_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            if let Some(props) = global.props {
+                handle_device_update(reg_device_and_link_listener_devices_map.clone(), props);
+                handle_port_update(ports_map_clone.clone(), props);
+            }
+        })
+        .register();
+
+    let main_loop_weak = main_loop.downgrade();
+    let _sig_int = main_loop.loop_().add_signal_local(Signal::SIGINT, move || {
+        if let Some(main_loop) = main_loop_weak.upgrade() {
+            main_loop.quit();
+        }
+    });
+
+    let main_loop_weak = main_loop.downgrade();
+    let _sig_term = main_loop
+        .loop_()
+        .add_signal_local(Signal::SIGTERM, move || {
+            if let Some(main_loop) = main_loop_weak.upgrade() {
+                main_loop.quit();
+            }
+        });
+
+    let _receiver = pipewire_receiver.attach(main_loop.loop_(), move |command: PipewireCommand| {
+        match command {
+            PipewireCommand::Connect => {
+                core.create_object::<pipewire::link::Link>(
+                    factory.get().unwrap(),
+                    &pipewire::properties::properties! {
+                            "link.output.port" => "0",
+                            "link.input.port" => "0",
+                            "link.output.node" => "73",
+                            "link.input.node" => "72",
+                    // Don't remove the object on the remote when we destroy our proxy.
+                            "object.linger" => "1"
+                        },
+                )
+                .unwrap();
+            }
+        }
+    });
+
+    main_loop.run();
+
+    Ok(())
 }
 
-fn connect_group_section_to_audio_output(jack_connection_manager: &JackConnectionManager,
-                                         audio_interface: &Umc1820,
-                                         group_mixer_section: &GroupMixerSection) {
-    jack_connection_manager.connect(
-        &group_mixer_section.output_channels()[0],
-        &audio_interface.input_channels()[0]
-    );
-    jack_connection_manager.connect(
-        &group_mixer_section.output_channels()[1],
-        &audio_interface.input_channels()[1]
-    );
-}
-
-fn connect_send_to_torso_s4(jack_connection_manager: &JackConnectionManager,
-                            main_input_mixer_section: &MainInputMixerChannel,
-                            audio_interface: &Umc1820) {
-    let send_mixer_t = main_input_mixer_section.send_mixer(4);
-    jack_connection_manager.connect(
-        &send_mixer_t.output_channels()[0],
-        &audio_interface.input_channels()[2]
-    );
-    jack_connection_manager.connect(
-        &send_mixer_t.output_channels()[1],
-        &audio_interface.input_channels()[3]
-    );
-}
-
-fn connect_zyn_sub_add_fx(jack_connection_manager: &JackConnectionManager,
-                          main_input_mixer_section: &MainInputMixerChannel,
-                          zyn_add_sub_fx: &ZynAddSubFx) {
-    jack_connection_manager.connect(
-        &zyn_add_sub_fx.output_channels()[0],
-        main_input_mixer_section.channel_inputs(7)[0]
-    );
-    jack_connection_manager.connect(
-        &zyn_add_sub_fx.output_channels()[1],
-        main_input_mixer_section.channel_inputs(7)[1]
-    );
-    jack_connection_manager.connect(
-        &zyn_add_sub_fx.output_channels()[0],
-        main_input_mixer_section.channel_inputs(7)[2]
-    );
-    jack_connection_manager.connect(
-        &zyn_add_sub_fx.output_channels()[1],
-        main_input_mixer_section.channel_inputs(7)[3]
-    );
-}
-
-fn connect_audio_interface(jack_connection_manager: &JackConnectionManager,
-                           main_input_mixer_section: &MainInputMixerChannel,
-                           audio_interface: &Umc1820) {
-    for channel_number in 0..6 {
-        jack_connection_manager.connect(
-            &audio_interface.output_channels()[2 * channel_number],
-            main_input_mixer_section.channel_inputs(channel_number + 1)[0]
-        );
-        jack_connection_manager.connect(
-            &audio_interface.output_channels()[2 * channel_number + 1],
-            main_input_mixer_section.channel_inputs(channel_number + 1)[1]
-        );
-        jack_connection_manager.connect(
-            &audio_interface.output_channels()[2 * channel_number],
-            main_input_mixer_section.channel_inputs(channel_number + 1)[2]
-        );
-        jack_connection_manager.connect(
-            &audio_interface.output_channels()[2 * channel_number + 1],
-            main_input_mixer_section.channel_inputs(channel_number + 1)[3]
-        );
+fn handle_device_update(devices_map: Arc<DashMap<String, PipewireDevice>>, props: &DictRef) {
+    match props.get("device.name") {
+        None => {}
+        Some(value) => {
+            let value_copy = String::from(value);
+            devices_map.insert(
+                value_copy.clone(),
+                PipewireDevice {
+                    name: value_copy.clone(),
+                    factory_id: String::from(props.get("factory.id").unwrap()),
+                    client_id: String::from(props.get("client.id").unwrap()),
+                    description: String::from(props.get("device.description").unwrap()),
+                    nick: String::from(props.get("device.nick").unwrap()),
+                    media_class: String::from(props.get("media.class").unwrap()),
+                    object_serial: String::from(props.get("object.serial").unwrap()),
+                },
+            );
+        }
     }
-
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 6],
-        main_input_mixer_section.channel_inputs(8)[0]
-    );
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 6 + 1],
-        main_input_mixer_section.channel_inputs(8)[1]
-    );
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 6],
-        main_input_mixer_section.channel_inputs(8)[2]
-    );
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 6 + 1],
-        main_input_mixer_section.channel_inputs(8)[3]
-    );
-
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 7],
-        main_input_mixer_section.channel_inputs(9)[0]
-    );
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 7 + 1],
-        main_input_mixer_section.channel_inputs(9)[1]
-    );
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 7],
-        main_input_mixer_section.channel_inputs(9)[2]
-    );
-    jack_connection_manager.connect(
-        &audio_interface.output_channels()[2 * 7 + 1],
-        main_input_mixer_section.channel_inputs(9)[3]
-    );
 }
 
-fn connect_digital_drum_section(jack_connection_manager: &JackConnectionManager,
-                                digital_drum_section: &DigitalDrumSection,
-                                main_input_mixer_section: &MainInputMixerChannel) {
-    jack_connection_manager.connect(
-        &digital_drum_section.output_channels()[0],
-        main_input_mixer_section.channel_inputs(0)[0],
-    );
-    jack_connection_manager.connect(
-        &digital_drum_section.output_channels()[1],
-        main_input_mixer_section.channel_inputs(0)[1],
-    );
-    jack_connection_manager.connect(
-        &digital_drum_section.output_channels()[0],
-        main_input_mixer_section.channel_inputs(0)[2],
-    );
-    jack_connection_manager.connect(
-        &digital_drum_section.output_channels()[1],
-        main_input_mixer_section.channel_inputs(0)[3],
-    );
+fn handle_port_update(ports_map: Arc<DashMap<String, PipewirePort>>, props: &DictRef) {
+    match props.get("port.name") {
+        None => {}
+        Some(_value) => {
+            let port = PipewirePort {
+                id: String::from(props.get("port.id").unwrap()),
+                name: String::from(props.get("port.name").unwrap()),
+                direction: String::from(props.get("port.direction").unwrap()),
+                physical: String::from(match props.get("port.physical") {
+                    None => { "" }
+                    Some(physical) => { physical }
+                }),
+                alias: String::from(props.get("port.alias").unwrap()),
+                group: String::from(match props.get("port.group") {
+                    None => { "" }
+                    Some(prop) => { prop }
+                }),
+                path: String::from(props.get("object.path").unwrap()),
+                dsp_format: String::from(props.get("format.dsp").unwrap()),
+                node_id: String::from(props.get("node.id").unwrap()),
+                audio_channel: String::from(match props.get("audio.channel") {
+                    None => { "" }
+                    Some(audio_channel) => { audio_channel }
+                }),
+            };
+
+            ports_map.insert(port.alias.clone(), port);
+        }
+    }
+}
+
+fn start_mod_host_service_thread(
+    mod_host_queue_receiver: Receiver<ModHostCommand>,
+) -> Result<JoinHandle<()>> {
+    let stream = TcpStream::connect("127.0.0.1:5555")?;
+    let mod_host_service_thread = thread::spawn(move || {
+        let mut mod_host_client = ModHostClient::new(stream);
+        let mut next_plugin_index = 0;
+        loop {
+            match mod_host_queue_receiver.recv() {
+                Ok(command) => match command {
+                    ModHostCommand::Add(lv2_plugin_uri) => {
+                        let new_plugin_index = next_plugin_index;
+                        next_plugin_index += 1;
+                        match mod_host_client.add_plugin(lv2_plugin_uri.as_str(), new_plugin_index)
+                        {
+                            Ok(_) => {
+                                println!("Created")
+                            }
+                            Err(error) => {
+                                print!("Error {}", error)
+                            }
+                        }
+                    }
+                },
+                Err(error) => {
+                    println!("{}", error);
+                }
+            }
+        }
+    });
+    Ok(mod_host_service_thread)
 }

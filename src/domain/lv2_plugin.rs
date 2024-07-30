@@ -1,8 +1,9 @@
 use crate::domain::port::Port;
 
-pub trait Lv2Plugin {
-    fn index() -> u16;
-    fn name() -> String;
-    fn input_ports() -> Vec<Port>;
-    fn output_ports() -> Vec<Port>;
+#[derive(Debug)]
+pub struct Lv2Plugin {
+    pub index: u16,
+    pub(crate) name: String,
+    pub(crate) input_ports: Vec<Port>,
+    pub(crate) output_ports: Vec<Port>
 }

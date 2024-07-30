@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct Port {
-    name: String
+    pub name: String
 }

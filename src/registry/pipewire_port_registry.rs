@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct PipewireNode {
-    pub(crate) name: String,
-    in_ports: Vec<PipewirePort>,
-    out_ports: Vec<PipewirePort>,
+    pub name: String,
+    pub in_ports: Vec<PipewirePort>,
+    pub out_ports: Vec<PipewirePort>,
 }
 
+#[derive(Clone, Debug)]
 pub struct PipewirePortRegistry {
     pub(crate) ports_map: Arc<DashMap<String, PipewirePort>>,
 }

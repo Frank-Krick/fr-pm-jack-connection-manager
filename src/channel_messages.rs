@@ -1,5 +1,5 @@
 pub enum ModHostCommand {
-    Add(String)
+    Add(String, u16)
 }
 
 #[derive(Debug)]

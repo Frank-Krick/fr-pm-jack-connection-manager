@@ -1,2 +1,2 @@
-mod port;
-mod lv2_plugin;
+pub mod port;
+pub mod lv2_plugin;

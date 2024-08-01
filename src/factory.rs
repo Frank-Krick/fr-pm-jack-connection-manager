@@ -1,5 +1,6 @@
 pub mod lv2_plugin_future;
 
+use std::iter;
 use anyhow::Result;
 
 use crate::fr_pipewire::PipewirePort;
@@ -8,6 +9,10 @@ use crate::service::mod_host_service::ModHostService;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::task::Waker;
+use itertools::Itertools;
+use pipewire::spa::utils::dict::ParsableValue;
+use crate::domain::lv2_plugin::Lv2Plugin;
+use crate::domain::port::Port;
 use crate::factory::lv2_plugin_future::Lv2PluginFuture;
 use crate::service::pipewire_service::PipewireService;
 
@@ -55,5 +60,70 @@ impl PerformanceMixerFactory {
                 Some(waker) => { waker.wake() }
             }
         }
+    }
+
+    pub async fn build_channel_strip(&mut self) -> [Lv2Plugin; 4] {
+        let lv2_plugin_saturator = self
+            .add_lv2_plugin(String::from(
+                "http://calf.sourceforge.net/plugins/Saturator",
+            ))
+            .unwrap()
+            .await;
+
+        let lv2_plugin_compressor = self
+            .add_lv2_plugin(String::from(
+                "http://calf.sourceforge.net/plugins/Compressor",
+            ))
+            .unwrap()
+            .await;
+
+        connect_matched_audio_ports(
+            &lv2_plugin_saturator.output_ports,
+            &lv2_plugin_compressor.input_ports,
+            &self.pipewire_service);
+
+        let lv2_plugin_eq = self
+            .add_lv2_plugin(String::from("http://distrho.sf.net/plugins/3BandEQ"))
+            .unwrap()
+            .await;
+
+        connect_matched_audio_ports(
+            &lv2_plugin_compressor.output_ports,
+            &lv2_plugin_eq.input_ports,
+            &self.pipewire_service);
+
+        let lv2_plugin_gain = self
+            .add_lv2_plugin(String::from("http://kxstudio.sf.net/carla/plugins/audiogain_s"))
+            .unwrap()
+            .await;
+
+        connect_matched_audio_ports(
+            &lv2_plugin_eq.output_ports,
+            &lv2_plugin_gain.input_ports,
+            &self.pipewire_service);
+
+        [lv2_plugin_saturator, lv2_plugin_compressor, lv2_plugin_eq, lv2_plugin_gain]
+    }
+}
+
+fn connect_matched_audio_ports(output_ports: &Vec<Port>,
+                               input_ports: &Vec<Port>,
+                               pipewire_service: &PipewireService) {
+    let saturator_output_channels = output_ports.iter().filter(|p| {
+        p.dsp_format.contains("audio")
+    }).sorted_by_key(|p| u32::parse_value(&*p.id));
+
+    let compressor_input_channels = input_ports.iter().filter(|p| {
+        p.dsp_format.contains("audio")
+    }).sorted_by_key(|p| u32::parse_value(&*p.id));
+
+    let matched_channels = iter::zip(saturator_output_channels, compressor_input_channels);
+    for matched_channel in matched_channels {
+        pipewire_service.connect(
+            matched_channel.0.node_id.clone(),
+            matched_channel.0.id.clone(),
+            matched_channel.1.node_id.clone(),
+            matched_channel.1. id.clone()
+        );
     }
 }

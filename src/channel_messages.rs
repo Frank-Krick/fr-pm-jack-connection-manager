@@ -4,5 +4,5 @@ pub enum ModHostCommand {
 
 #[derive(Debug)]
 pub enum PipewireCommand {
-    Connect
+    Connect(String, String, String, String)
 }

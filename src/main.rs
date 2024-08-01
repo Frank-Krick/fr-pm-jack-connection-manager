@@ -1,26 +1,25 @@
+use std::cell::OnceCell;
+use std::future::Future;
+use std::net::TcpStream;
+use std::rc::Rc;
+use std::sync::mpsc::Receiver;
+use std::sync::{mpsc, Arc, Barrier};
+use std::{iter, thread};
+use std::thread::JoinHandle;
+
 use anyhow::Result;
+use async_std::task;
 use dashmap::DashMap;
+use itertools::Itertools;
 use pipewire::channel;
 use pipewire::context::Context;
 use pipewire::loop_::Signal;
 use pipewire::main_loop::MainLoop;
-use pipewire::spa::utils::dict::DictRef;
+use pipewire::spa::utils::dict::{DictRef, ParsableValue};
 use pipewire::types::ObjectType;
-use std::cell::OnceCell;
-use std::future::Future;
-use std::net::TcpStream;
-use std::pin::pin;
-use std::rc::Rc;
-use std::sync::mpsc::Receiver;
-use std::sync::{mpsc, Arc, Barrier};
-use std::task::Poll;
-use std::thread;
-use std::thread::JoinHandle;
-use std::time::Duration;
-
+use PipewireCommand::Connect;
 use crate::channel_messages::{ModHostCommand, PipewireCommand};
 use crate::client::mod_host_client::ModHostClient;
-use crate::domain::lv2_plugin::Lv2Plugin;
 use crate::factory::PerformanceMixerFactory;
 use crate::fr_pipewire::{PipewireDevice, PipewirePort};
 use crate::service::mod_host_service::ModHostService;
@@ -50,44 +49,31 @@ fn main() -> Result<()> {
     let mod_host_service = ModHostService::new(mod_host_queue_sender.clone());
     let pipewire_service = PipewireService::new(pipewire_sender.clone());
     let mut factory =
-        PerformanceMixerFactory::new(ports_map_clone, mod_host_service, pipewire_service);
+        PerformanceMixerFactory::new(ports_map_clone, mod_host_service, pipewire_service.clone());
     let mut cloned_factory = factory.clone();
+    let cloned_pipewire_service = pipewire_service.clone();
     let _control_thread = thread::spawn(move || {
         barrier_clone.wait();
 
-        let lv2_plugin = cloned_factory
-            .add_lv2_plugin(String::from(
-                "http://calf.sourceforge.net/plugins/Compressor",
-            ))
-            .unwrap();
+        let build_graph_task = task::spawn(async move {
+            let channel_strip = cloned_factory.build_channel_strip().await;
 
-        let mut pinned = pin!(lv2_plugin);
-        let waker = futures::task::noop_waker_ref();
-        let mut cx = std::task::Context::from_waker(waker);
+            println!("{:?}", channel_strip);
+        });
 
-        while match pinned.as_mut().poll(&mut cx) {
-            Poll::Ready(lv2_plugin) => {
-                println!("{:?}", lv2_plugin);
-                false
-            }
-            Poll::Pending => {
-                thread::sleep(Duration::from_secs(1));
-                true
-            }
-        } {}
-
+        task::block_on(build_graph_task);
     });
 
     let devices_map_pipewire_loop = devices_map.clone();
     let ports_map_clone = ports_map.clone();
     let barrier_clone = barrier.clone();
-    let mut cloned_factory = factory.clone();
+    let cloned_factory = factory.clone();
     let _ = start_pipewire_loop(
         pipewire_receiver,
         devices_map_pipewire_loop,
         ports_map_clone,
         barrier_clone,
-        cloned_factory
+        cloned_factory,
     );
 
     Ok(())
@@ -98,7 +84,7 @@ fn start_pipewire_loop(
     devices_map: Arc<DashMap<String, PipewireDevice>>,
     ports_map: Arc<DashMap<String, PipewirePort>>,
     barrier: Arc<Barrier>,
-    performance_mixer_factory: PerformanceMixerFactory
+    performance_mixer_factory: PerformanceMixerFactory,
 ) -> Result<()> {
     pipewire::init();
     let main_loop = MainLoop::new(None)?;
@@ -170,15 +156,14 @@ fn start_pipewire_loop(
 
     let _receiver = pipewire_receiver.attach(main_loop.loop_(), move |command: PipewireCommand| {
         match command {
-            PipewireCommand::Connect => {
+            Connect(output_node_id, output_port_id, input_node_id, input_port_id) => {
                 core.create_object::<pipewire::link::Link>(
                     factory.get().unwrap(),
                     &pipewire::properties::properties! {
-                            "link.output.port" => "0",
-                            "link.input.port" => "0",
-                            "link.output.node" => "73",
-                            "link.input.node" => "72",
-                    // Don't remove the object on the remote when we destroy our proxy.
+                            "link.output.port" => output_port_id,
+                            "link.input.port" => input_port_id,
+                            "link.output.node" => output_node_id,
+                            "link.input.node" => input_node_id,
                             "object.linger" => "1"
                         },
                 )
@@ -215,9 +200,11 @@ fn handle_device_update(devices_map: Arc<DashMap<String, PipewireDevice>>, props
     }
 }
 
-fn handle_port_update(ports_map: Arc<DashMap<String, PipewirePort>>,
-                      props: &DictRef,
-                      performance_mixer_factory: &PerformanceMixerFactory) {
+fn handle_port_update(
+    ports_map: Arc<DashMap<String, PipewirePort>>,
+    props: &DictRef,
+    performance_mixer_factory: &PerformanceMixerFactory,
+) {
     match props.get("port.name") {
         None => {}
         Some(_value) => {

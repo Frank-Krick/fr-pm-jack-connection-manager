@@ -1,4 +1,4 @@
-use itertools::PadUsing;
+use crate::domain::port::Port;
 
 #[derive(Debug)]
 pub struct PipewireDevice {
@@ -23,4 +23,21 @@ pub struct PipewirePort {
     pub dsp_format: String,
     pub node_id: String,
     pub audio_channel: String
+}
+
+impl Port {
+    pub fn from(pipewire_port: &PipewirePort) -> Port {
+        Port {
+            id: pipewire_port.id.clone(),
+            name: pipewire_port.name.clone(),
+            direction: pipewire_port.direction.clone(),
+            physical: pipewire_port.physical.clone(),
+            alias: pipewire_port.alias.clone(),
+            group: pipewire_port.group.clone(),
+            path: pipewire_port.path.clone(),
+            dsp_format: pipewire_port.dsp_format.clone(),
+            node_id: pipewire_port.node_id.clone(),
+            audio_channel: pipewire_port.audio_channel.clone()
+        }
+    }
 }

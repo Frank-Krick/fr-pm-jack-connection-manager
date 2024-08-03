@@ -1,9 +1,8 @@
 use crate::domain::port::Port;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
-pub struct Lv2Plugin {
-    pub index: u16,
+pub struct AudioInterface {
     pub name: String,
     pub input_ports: Vec<Port>,
     pub output_ports: Vec<Port>

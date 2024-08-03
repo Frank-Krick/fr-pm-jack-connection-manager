@@ -17,7 +17,7 @@ impl ModHostService {
         ModHostService { channel_sender, next_plugin_index: Arc::new(AtomicU16::new(0)) }
     }
 
-    pub fn add_lv2_plugin(&mut self, lv2_plugin_uri: String) -> Result<u16> {
+    pub fn add_lv2_plugin(&self, lv2_plugin_uri: String) -> Result<u16> {
         let index = self.next_plugin_index.fetch_add(1, Ordering::Relaxed);
         match self.channel_sender.send(
             ModHostCommand::Add(lv2_plugin_uri, index)) {

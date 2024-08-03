@@ -29,7 +29,7 @@ impl Future for Lv2PluginFuture {
             })
             .collect::<Vec<PipewireNode>>();
         if nodes.is_empty() {
-            self.future_states.alter(&self.index, |k, fs| FutureState {
+            self.future_states.alter(&self.index, |_k, _fs| FutureState {
                 waker: Some(context.waker().clone()),
             });
             Poll::Pending

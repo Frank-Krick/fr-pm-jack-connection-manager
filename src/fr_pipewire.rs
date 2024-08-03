@@ -1,6 +1,7 @@
 use crate::domain::port::Port;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PipewireDevice {
     pub name: String,
     pub factory_id: String,

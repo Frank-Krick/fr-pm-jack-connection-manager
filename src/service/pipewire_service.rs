@@ -18,18 +18,13 @@ impl PipewireService {
         input_node_id: String,
         input_port_id: String,
     ) {
-        match self.channel_sender.send(PipewireCommand::Connect(
+        let message = PipewireCommand::Connect(
             output_node_id,
             output_port_id,
             input_node_id,
             input_port_id,
-        )) {
-            Ok(_) => {
-                println!("added")
-            }
-            Err(error) => {
-                println!("failed {:?}", error)
-            }
-        }
+        );
+        println!("Sending message:{message:#?}");
+        self.channel_sender.send(message).expect("Couldn't send message to channel")
     }
 }

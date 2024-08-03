@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PipewireNode {
     pub name: String,
     pub in_ports: Vec<PipewirePort>,
